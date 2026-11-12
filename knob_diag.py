@@ -94,15 +94,15 @@ def report(data):
           f"brightness {config.get('brightness')}  rgb {'on' if config.get('rgb') else 'off'}  "
           f"supply {supply}  battery {battery if battery is not None else '-'}%")
 
+    slots = bonds.get("slots", [])
+    active = sum(1 for slot in slots if slot.get("connected"))
+    # The firmware's "links" counter is connection attempts, not live links.
     print(f"BLE     {ADVERTISING.get(bonds.get('adv', 0), '?')}"
           f"{', filtered' if bonds.get('filtered') else ''}"
-          f"  links {ble.get('links', 0)}  pairing {'yes' if ble.get('pairing') else 'no'}")
+          f"  attempts {ble.get('links', 0)}  active links {active}"
+          f"  pairing {'yes' if ble.get('pairing') else 'no'}")
 
-    print("slots   " + "  ".join(f"{index + 1}:{address.split(' ')[0]}"
-                                 for index, address in enumerate(
-                                     slot.get("addr", "") for slot in bonds.get("slots", []))), end="")
-    print()
-    for index, slot in enumerate(bonds.get("slots", [])):
+    for index, slot in enumerate(slots):
         if not slot.get("bonded"):
             label = "empty"
         else:
