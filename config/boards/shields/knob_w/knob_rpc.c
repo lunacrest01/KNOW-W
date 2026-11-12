@@ -236,6 +236,7 @@ static void handle(char *line) {
         }
     } else if (!strcmp(req.cmd,"hard_reset")) { err=knob_factory_reset(); reset=!err; }
     else if (!strcmp(req.cmd,"reset_bootloader")) { err=knob_factory_reset(); reset=!err; boot=!err; }
+    else if (!strcmp(req.cmd,"bootloader")) { reset=true; boot=true; }
     else if (strcmp(req.cmd,"ping") && strcmp(req.cmd,"get_config") && strcmp(req.cmd,"get_status")) { err=-ENOTSUP; }
     char reply[850];
     if (err) { snprintf(reply,sizeof(reply),"{\"id\":%d,\"ok\":false,\"error\":\"Invalid command or save failed (%d)\"}\n",req.id,err); }

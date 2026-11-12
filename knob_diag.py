@@ -5,6 +5,7 @@
     python knob_diag.py --capture 120      # raw debug log into build/pairing-capture.log
     python knob_diag.py --pair 2           # open a pairing window on slot 2 (diagnostic image only)
     python knob_diag.py --factory-bootloader   # erase every setting, then reboot to the UF2 bootloader
+    python knob_diag.py --bootloader      # reboot to the UF2 bootloader and keep all settings
 
 Connect the knob over USB and close Studio's serial connection first.
 Nothing here erases a bond or changes a saved setting, except
@@ -160,6 +161,8 @@ def main():
     parser.add_argument("--pair", type=int, choices=[1, 2, 3], metavar="SLOT")
     parser.add_argument("--factory-bootloader", action="store_true",
                         help="erase all settings and bonds, then reboot to the UF2 bootloader")
+    parser.add_argument("--bootloader", action="store_true",
+                        help="reboot to the UF2 bootloader without erasing settings")
     parser.add_argument("--json", action="store_true", help="print the raw replies")
     options = parser.parse_args()
 
@@ -167,6 +170,13 @@ def main():
         watch(options.watch)
     elif options.capture:
         capture(options.capture)
+    elif options.bootloader:
+        print("Rebooting to the UF2 bootloader (settings kept)...")
+        try:
+            request("bootloader")
+        except SystemExit as error:
+            print(f"no reply ({error}) - this is normal for a reset")
+        print("Look for the NICENANO drive.")
     elif options.factory_bootloader:
         print("Erasing all settings and bonds, then rebooting to the bootloader...")
         try:
