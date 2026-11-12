@@ -4,6 +4,8 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/data/json.h>
 #include <zephyr/sys/reboot.h>
+#include <cmsis_core.h>
+#include <hal/nrf_power.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zmk/ble.h>
@@ -124,6 +126,7 @@ static void handle(char *line) {
     struct knob_config cfg = knob_config;
     int err=0;
     bool reset=false;
+    bool boot=false;
     if (!strcmp(req.cmd,"get_stack_diag")) {
 #if IS_ENABLED(CONFIG_INIT_STACKS)
         extern struct k_thread prio_recv_thread_data,recv_thread_data;
@@ -232,6 +235,7 @@ static void handle(char *line) {
             err=knob_pair(false);
         }
     } else if (!strcmp(req.cmd,"hard_reset")) { err=knob_factory_reset(); reset=!err; }
+    else if (!strcmp(req.cmd,"reset_bootloader")) { err=knob_factory_reset(); reset=!err; boot=!err; }
     else if (strcmp(req.cmd,"ping") && strcmp(req.cmd,"get_config") && strcmp(req.cmd,"get_status")) { err=-ENOTSUP; }
     char reply[850];
     if (err) { snprintf(reply,sizeof(reply),"{\"id\":%d,\"ok\":false,\"error\":\"Invalid command or save failed (%d)\"}\n",req.id,err); }
@@ -264,7 +268,16 @@ static void handle(char *line) {
             cfg.doubles[0],cfg.doubles[1],cfg.doubles[2],cfg.doubles[3],cfg.doubles[4]);
     }
     send(reply);
-    if (reset) { k_sleep(K_MSEC(250)); sys_reboot(SYS_REBOOT_COLD); }
+    if (reset) {
+        k_sleep(K_MSEC(250));
+        if (boot) {
+            /* 0x57 is the Adafruit/nice!nano UF2 magic. sys_reboot() does not carry
+             * it through on nRF, so store it in GPREGRET and reset directly. */
+            nrf_power_gpregret_set(NRF_POWER, 0, 0x57);
+            NVIC_SystemReset();
+        }
+        sys_reboot(SYS_REBOOT_COLD);
+    }
 }
 static void rpc(void *a,void *b,void *c) {
     bool usb_ready=device_is_ready(uart) && !uart_irq_callback_user_data_set(uart,ready,NULL);

@@ -4,9 +4,11 @@
     python knob_diag.py --watch 60         # sample into build/knob-status.jsonl
     python knob_diag.py --capture 120      # raw debug log into build/pairing-capture.log
     python knob_diag.py --pair 2           # open a pairing window on slot 2 (diagnostic image only)
+    python knob_diag.py --factory-bootloader   # erase every setting, then reboot to the UF2 bootloader
 
 Connect the knob over USB and close Studio's serial connection first.
-Nothing here erases a bond or changes a saved setting.
+Nothing here erases a bond or changes a saved setting, except
+``--factory-bootloader``, which erases everything by design.
 """
 import argparse
 import json
@@ -156,6 +158,8 @@ def main():
     parser.add_argument("--watch", type=float, metavar="SECONDS")
     parser.add_argument("--capture", type=float, metavar="SECONDS")
     parser.add_argument("--pair", type=int, choices=[1, 2, 3], metavar="SLOT")
+    parser.add_argument("--factory-bootloader", action="store_true",
+                        help="erase all settings and bonds, then reboot to the UF2 bootloader")
     parser.add_argument("--json", action="store_true", help="print the raw replies")
     options = parser.parse_args()
 
@@ -163,6 +167,14 @@ def main():
         watch(options.watch)
     elif options.capture:
         capture(options.capture)
+    elif options.factory_bootloader:
+        print("Erasing all settings and bonds, then rebooting to the bootloader...")
+        try:
+            request("reset_bootloader")
+        except SystemExit as error:
+            # The device resets before the reply always arrives; that is expected.
+            print(f"no reply ({error}) - this is normal for a reset")
+        print("Look for the NICENANO drive, then copy a UF2 image to it.")
     elif options.pair:
         reply = request("ble_start_pairing", layer=options.pair - 1)
         print(json.dumps(reply, indent=1) if options.json else
