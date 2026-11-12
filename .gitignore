@@ -1,0 +1,10 @@
+/build/
+/backups/
+/zmk/
+/zephyr/
+/modules/
+/.west/
+__pycache__/
+.pytest_cache/
+/.freebuff/
+third_party/*/.git-upstream/

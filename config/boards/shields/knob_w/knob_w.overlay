@@ -1,0 +1,90 @@
+#include <dt-bindings/led/led.h>
+
+&adc { status = "okay"; };
+/ {
+    knob_battery: knob_battery { compatible = "zmk,battery-nrf-vddh"; };
+};
+
+&uart0 { status = "disabled"; };
+&i2c1 { status = "disabled"; };
+&spi2 { status = "disabled"; };
+&pwm0 { status = "disabled"; };
+&{/pwmleds} { status = "disabled"; };
+
+&i2c0 {
+    compatible = "nordic,nrf-twim";
+    status = "okay";
+    clock-frequency = <400000>;
+    /* One control byte followed by the complete 128x32 monochrome frame. */
+    zephyr,concat-buf-size = <513>;
+    zephyr,flash-buf-max-size = <513>;
+    oled: ssd1306@3c {
+        compatible = "solomon,ssd1306fb";
+        reg = <0x3c>;
+        width = <128>;
+        height = <32>;
+        segment-offset = <0>;
+        page-offset = <0>;
+        display-offset = <0>;
+        multiplex-ratio = <31>;
+        com-sequential;
+        /* Native SSD1306 scan direction: rotated 180 degrees from the prior UI. */
+        prechargep = <0x22>;
+    };
+};
+
+&pinctrl {
+    knob_rgb_default: knob_rgb_default {
+        group1 { psels = <NRF_PSEL(SPIM_MOSI, 0, 10)>; };
+    };
+    knob_rgb_sleep: knob_rgb_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_MOSI, 0, 10)>;
+            low-power-enable;
+        };
+    };
+};
+
+&spi3 {
+    compatible = "nordic,nrf-spim";
+    status = "okay";
+    pinctrl-0 = <&knob_rgb_default>;
+    pinctrl-1 = <&knob_rgb_sleep>;
+    pinctrl-names = "default", "sleep";
+    knob_rgb: ws2812@0 {
+        compatible = "worldsemi,ws2812-spi";
+        reg = <0>;
+        spi-max-frequency = <4000000>;
+        chain-length = <2>;
+        spi-one-frame = <0x70>;
+        spi-zero-frame = <0x40>;
+        color-mapping = <LED_COLOR_ID_GREEN LED_COLOR_ID_RED LED_COLOR_ID_BLUE>;
+    };
+};
+
+/ {
+    chosen {
+        zmk,kscan = &knob_button;
+        zmk,underglow = &knob_rgb;
+        zephyr,display = &oled;
+    };
+    knob_button: kscan {
+        compatible = "zmk,kscan-gpio-direct";
+        input-gpios = <&gpio0 17 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+                      <&gpio0 20 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+        debounce-press-ms = <5>;
+        debounce-release-ms = <5>;
+        wakeup-source;
+    };
+    knob_encoder: encoder {
+        compatible = "alps,ec11";
+        a-gpios = <&gpio0 6 GPIO_PULL_UP>;
+        b-gpios = <&gpio0 8 GPIO_PULL_UP>;
+        steps = <80>;
+    };
+    sensors: sensors {
+        compatible = "zmk,keymap-sensors";
+        sensors = <&knob_encoder>;
+        triggers-per-rotation = <20>;
+    };
+};

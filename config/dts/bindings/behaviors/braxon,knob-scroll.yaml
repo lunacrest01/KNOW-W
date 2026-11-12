@@ -1,0 +1,3 @@
+description: Single relative wheel step for a KNOB-W encoder detent
+compatible: "braxon,knob-scroll"
+include: one_param.yaml

@@ -1,0 +1,72 @@
+#define ZMK_POINTING_DEFAULT_SCRL_VAL 1
+#include <behaviors.dtsi>
+#include <dt-bindings/zmk/keys.h>
+#include <dt-bindings/zmk/pointing.h>
+
+/ {
+    behaviors {
+        knob_action: knob_action {
+            compatible = "braxon,knob-control";
+            #binding-cells = <1>;
+        };
+        knob_nav: knob_nav {
+            compatible = "zmk,behavior-hold-tap";
+            #binding-cells = <2>;
+            tapping-term-ms = <2000>;
+            flavor = "tap-preferred";
+            bindings = <&knob_action>, <&knob_action>;
+        };
+        knob_turn: knob_turn {
+            compatible = "zmk,behavior-sensor-rotate";
+            tap-ms = <8>;
+            #sensor-binding-cells = <0>;
+            bindings = <&knob_action 2>, <&knob_action 3>;
+        };
+        knob_scroll: knob_scroll {
+            compatible = "braxon,knob-scroll";
+            #binding-cells = <1>;
+        };
+        vertical: vertical {
+            compatible = "zmk,behavior-sensor-rotate";
+            #sensor-binding-cells = <0>;
+            bindings = <&knob_scroll SCRL_DOWN>, <&knob_scroll SCRL_UP>;
+        };
+        horizontal: horizontal {
+            compatible = "zmk,behavior-sensor-rotate";
+            #sensor-binding-cells = <0>;
+            bindings = <&knob_scroll SCRL_RIGHT>, <&knob_scroll SCRL_LEFT>;
+        };
+    };
+    knob_scroll_listener {
+        compatible = "zmk,input-listener";
+        device = <&knob_scroll>;
+    };
+    keymap {
+        compatible = "zmk,keymap";
+        volume {
+            display-name = "VOLUME";
+            bindings = <&knob_nav 4 0>, <&knob_action 1>;
+            sensor-bindings = <&knob_turn>;
+        };
+        brightness {
+            display-name = "BRIGHTNESS";
+            bindings = <&knob_nav 4 0>, <&knob_action 1>;
+            sensor-bindings = <&knob_turn>;
+        };
+        scroll_vertical {
+            display-name = "SCROLL";
+            bindings = <&knob_nav 4 0>, <&knob_action 1>;
+            sensor-bindings = <&knob_turn>;
+        };
+        scroll_horizontal {
+            display-name = "H-SCROLL";
+            bindings = <&knob_nav 4 0>, <&knob_action 1>;
+            sensor-bindings = <&knob_turn>;
+        };
+        media {
+            display-name = "MEDIA";
+            bindings = <&knob_nav 4 0>, <&knob_action 1>;
+            sensor-bindings = <&knob_turn>;
+        };
+    };
+};

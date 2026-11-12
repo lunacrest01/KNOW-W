@@ -1,0 +1,3 @@
+description: KNOB-W fixed navigation and configurable encoder actions
+compatible: "braxon,knob-control"
+include: one_param.yaml

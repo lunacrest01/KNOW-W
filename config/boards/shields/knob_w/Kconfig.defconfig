@@ -1,0 +1,10 @@
+if SHIELD_KNOB_W
+config BT_LONG_WQ_STACK_SIZE
+    default 4096
+config BT_CTLR_RX_PRIO_STACK_SIZE
+    default 2048
+config BT_CTLR_RX_STACK_SIZE
+    default 3072
+config ZMK_KEYBOARD_NAME
+    default "KNOB-W"
+endif

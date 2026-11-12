@@ -1,0 +1,479 @@
+diff --git a/app/include/zmk/rgb_underglow.h b/app/include/zmk/rgb_underglow.h
+index be0ef252..1b652323 100644
+--- a/app/include/zmk/rgb_underglow.h
++++ b/app/include/zmk/rgb_underglow.h
+@@ -26,4 +26,5 @@ int zmk_rgb_underglow_change_hue(int direction);
+ int zmk_rgb_underglow_change_sat(int direction);
+ int zmk_rgb_underglow_change_brt(int direction);
+ int zmk_rgb_underglow_change_spd(int direction);
++int zmk_rgb_underglow_set_spd(uint8_t speed);
+ int zmk_rgb_underglow_set_hsb(struct zmk_led_hsb color);
+diff --git a/app/src/ble.c b/app/src/ble.c
+index 51b172b9..f3f973e1 100644
+--- a/app/src/ble.c
++++ b/app/src/ble.c
+@@ -36,6 +36,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+ #include <zmk/split/bluetooth/uuid.h>
+ #include <zmk/event_manager.h>
+ #include <zmk/events/ble_active_profile_changed.h>
++#include <zmk/knob_bond_policy.h>
+ 
+ #if IS_ENABLED(CONFIG_ZMK_BLE_PASSKEY_ENTRY)
+ #include <zmk/events/keycode_state_changed.h>
+@@ -61,6 +62,17 @@ enum advertising_type {
+ 
+ static struct zmk_ble_profile profiles[ZMK_BLE_PROFILE_COUNT];
+ static uint8_t active_profile;
++static bool advertising_filtered;
++static bool advertising_dirty;
++static atomic_t last_link_error, last_security_error, last_pair_error, last_disconnect;
++static atomic_t link_attempts, pairing_attempts;
++static uint32_t profile_generation[ZMK_BLE_PROFILE_COUNT];
++static struct { int slot; uint32_t generation; } pairing_context[CONFIG_BT_MAX_CONN];
++void knob_ble_diag(int values[6]) {
++    values[0]=atomic_get(&link_attempts); values[1]=atomic_get(&last_link_error);
++    values[2]=atomic_get(&pairing_attempts); values[3]=atomic_get(&last_pair_error);
++    values[4]=atomic_get(&last_security_error); values[5]=atomic_get(&last_disconnect);
++}
+ 
+ #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
+ #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
+@@ -72,9 +84,11 @@ BUILD_ASSERT(
+ static struct bt_data zmk_ble_ad[] = {
+     BT_DATA_BYTES(BT_DATA_GAP_APPEARANCE, BT_BYTES_LIST_LE16(CONFIG_BT_DEVICE_APPEARANCE)),
+     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+-    BT_DATA_BYTES(BT_DATA_UUID16_SOME, BT_UUID_16_ENCODE(BT_UUID_HIDS_VAL), /* HID Service */
+-                  BT_UUID_16_ENCODE(BT_UUID_BAS_VAL)                        /* Battery Service */
+-                  ),
++#if IS_ENABLED(CONFIG_BT_BAS)
++    BT_DATA_BYTES(BT_DATA_UUID16_SOME, BT_UUID_16_ENCODE(BT_UUID_HIDS_VAL), BT_UUID_16_ENCODE(BT_UUID_BAS_VAL)),
++#else
++    BT_DATA_BYTES(BT_DATA_UUID16_SOME, BT_UUID_16_ENCODE(BT_UUID_HIDS_VAL)),
++#endif
+ };
+ 
+ #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+@@ -110,6 +124,7 @@ void set_profile_address(uint8_t index, const bt_addr_le_t *addr) {
+     bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
+ 
+     memcpy(&profiles[index].peer, addr, sizeof(bt_addr_le_t));
++    advertising_dirty = true;
+     sprintf(setting_name, "ble/profiles/%d", index);
+     LOG_DBG("Setting profile addr for %s to %s", setting_name, addr_str);
+ #if IS_ENABLED(CONFIG_SETTINGS)
+@@ -167,21 +182,60 @@ bool zmk_ble_profile_is_connected(uint8_t index) {
+     advertising_status = ZMK_ADV_DIR;
+ 
+ #define CHECKED_OPEN_ADV()                                                                         \
+-    err = bt_le_adv_start(ZMK_ADV_CONN_NAME, zmk_ble_ad, ARRAY_SIZE(zmk_ble_ad), NULL, 0);         \
++    err = knob_start_advertising();                                                               \
+     if (err) {                                                                                     \
+         LOG_ERR("Advertising failed to start (err %d)", err);                                      \
+         return err;                                                                                \
+     }                                                                                              \
+     advertising_status = ZMK_ADV_CONN;
+ 
++/* KNOB-W only: empty slots are discoverable solely during explicit pairing. */
++__weak bool knob_pairing_allowed(void) { return true; }
++static bool knob_new_pairing(void) {
++    return knob_pairing_allowed() && zmk_ble_active_profile_is_open();
++}
++static bool knob_reconnect_needed(void) {
++    for (int i=0;i<ZMK_BLE_PROFILE_COUNT;i++) {
++        if (!zmk_ble_profile_is_open(i) && !zmk_ble_profile_is_connected(i)) { return true; }
++    }
++    return false;
++}
++static int knob_start_advertising(void) {
++    struct bt_le_adv_param params = *ZMK_ADV_CONN_NAME;
++#if IS_ENABLED(CONFIG_SHIELD_KNOB_W)
++    BUILD_ASSERT(CONFIG_BT_CTLR_FAL_SIZE >= ZMK_BLE_PROFILE_COUNT);
++    if (knob_new_pairing()) {
++        params.interval_min = BT_GAP_MS_TO_ADV_INTERVAL(20);
++        params.interval_max = BT_GAP_MS_TO_ADV_INTERVAL(20);
++    } else {
++        int err=bt_le_filter_accept_list_clear();
++        if (err) { return err; }
++        for (int i=0;i<ZMK_BLE_PROFILE_COUNT;i++) {
++            if (zmk_ble_profile_is_open(i)) { continue; }
++            err=bt_le_filter_accept_list_add(zmk_ble_profile_address(i));
++            if (err) { return err; }
++        }
++        params.options |= BT_LE_ADV_OPT_FILTER_CONN | BT_LE_ADV_OPT_FILTER_SCAN_REQ;
++    }
++#endif
++    int err = bt_le_adv_start(&params, zmk_ble_ad, ARRAY_SIZE(zmk_ble_ad), NULL, 0);
++    if (!err) {
++        advertising_filtered = (params.options & BT_LE_ADV_OPT_FILTER_CONN) != 0;
++        advertising_dirty = false;
++    }
++    return err;
++}
++
+ int update_advertising(void) {
+     int err = 0;
+     bt_addr_le_t *addr;
+     struct bt_conn *conn;
+     enum advertising_type desired_adv = ZMK_ADV_NONE;
+ 
+-    if (zmk_ble_active_profile_is_open()) {
+-        desired_adv = ZMK_ADV_CONN;
++    if (IS_ENABLED(CONFIG_SHIELD_KNOB_W)) {
++        desired_adv = knob_new_pairing() || knob_reconnect_needed() ? ZMK_ADV_CONN : ZMK_ADV_NONE;
++    } else if (zmk_ble_active_profile_is_open()) {
++        desired_adv = knob_pairing_allowed() ? ZMK_ADV_CONN : ZMK_ADV_NONE;
+     } else if (!zmk_ble_active_profile_is_connected()) {
+         desired_adv = ZMK_ADV_CONN;
+         // Need to fix directed advertising for privacy centrals. See
+@@ -194,6 +248,12 @@ int update_advertising(void) {
+     }
+     LOG_DBG("advertising from %d to %d", advertising_status, desired_adv);
+ 
++    /* Refresh filters only when entering/leaving pairing, not for every UI event. */
++    if (!advertising_dirty && desired_adv == ZMK_ADV_CONN && advertising_status == ZMK_ADV_CONN &&
++        advertising_filtered == (IS_ENABLED(CONFIG_SHIELD_KNOB_W) && !knob_new_pairing())) {
++        return 0;
++    }
++
+     switch (desired_adv + CURR_ADV(advertising_status)) {
+     case ZMK_ADV_NONE + CURR_ADV(ZMK_ADV_DIR):
+     case ZMK_ADV_NONE + CURR_ADV(ZMK_ADV_CONN):
+@@ -208,6 +268,7 @@ int update_advertising(void) {
+         CHECKED_DIR_ADV();
+         break;
+     case ZMK_ADV_CONN + CURR_ADV(ZMK_ADV_DIR):
++    case ZMK_ADV_CONN + CURR_ADV(ZMK_ADV_CONN):
+         CHECKED_ADV_STOP();
+         CHECKED_OPEN_ADV();
+         break;
+@@ -223,7 +284,15 @@ static void update_advertising_callback(struct k_work *work) { update_advertisin
+ 
+ K_WORK_DEFINE(update_advertising_work, update_advertising_callback);
+ 
++static void disconnect_slot(struct bt_conn *conn,void *context) {
++    uint8_t slot=*(uint8_t *)context;
++    if (pairing_context[bt_conn_index(conn)].slot==slot) {
++        bt_conn_disconnect(conn,BT_HCI_ERR_REMOTE_USER_TERM_CONN);
++    }
++}
+ static void clear_profile_bond(uint8_t profile) {
++    profile_generation[profile]++;
++    bt_conn_foreach(BT_CONN_TYPE_LE,disconnect_slot,&profile);
+     if (bt_addr_le_cmp(&profiles[profile].peer, BT_ADDR_LE_ANY)) {
+         bt_unpair(BT_ID_DEFAULT, &profiles[profile].peer);
+         set_profile_address(profile, BT_ADDR_LE_ANY);
+@@ -278,7 +347,11 @@ static struct k_work_delayable ble_save_work;
+ 
+ static int ble_save_profile(void) {
+ #if IS_ENABLED(CONFIG_SETTINGS)
++#if IS_ENABLED(CONFIG_SHIELD_KNOB_W)
++    return settings_save_one("ble/active_profile", &active_profile, sizeof(active_profile));
++#else
+     return k_work_reschedule(&ble_save_work, K_MSEC(CONFIG_ZMK_SETTINGS_SAVE_DEBOUNCE));
++#endif
+ #else
+     return 0;
+ #endif
+@@ -294,8 +367,10 @@ int zmk_ble_prof_select(uint8_t index) {
+         return 0;
+     }
+ 
++    uint8_t previous=active_profile;
+     active_profile = index;
+-    ble_save_profile();
++    int err=ble_save_profile();
++    if (err<0) { active_profile=previous; return err; }
+ 
+     update_advertising();
+ 
+@@ -496,13 +571,27 @@ static struct settings_handler profiles_handler = {
+ static bool is_conn_active_profile(const struct bt_conn *conn) {
+     return bt_addr_le_cmp(bt_conn_get_dst(conn), &profiles[active_profile].peer) == 0;
+ }
+-
++bool knob_ble_hid_ready(void) {
++    struct bt_conn *conn=zmk_ble_active_profile_conn();
++    if (!conn) { return false; }
++    bool ready=bt_conn_get_security(conn)>=BT_SECURITY_L2;
++    bt_conn_unref(conn);
++    return ready;
++}
+ static void connected(struct bt_conn *conn, uint8_t err) {
+     char addr[BT_ADDR_LE_STR_LEN];
+     struct bt_conn_info info;
+     LOG_DBG("Connected thread: %p", k_current_get());
+ 
+-    bt_conn_get_info(conn, &info);
++    atomic_inc(&link_attempts);
++    atomic_set(&last_link_error,err);
++    if (err) {
++        LOG_WRN("Connection establishment failed (%u)", err);
++        advertising_status = ZMK_ADV_NONE;
++        k_work_submit(&update_advertising_work);
++        return;
++    }
++    if (bt_conn_get_info(conn, &info)) { return; }
+ 
+     if (info.role != BT_CONN_ROLE_PERIPHERAL) {
+         LOG_DBG("SKIPPING FOR ROLE %d", info.role);
+@@ -512,15 +601,17 @@ static void connected(struct bt_conn *conn, uint8_t err) {
+     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+     advertising_status = ZMK_ADV_NONE;
+ 
+-    if (err) {
+-        LOG_WRN("Failed to connect to %s (%u)", addr, err);
+-        update_advertising();
+-        return;
+-    }
+-
++    int known=zmk_ble_profile_index(bt_conn_get_dst(conn));
++    int slot=KNOB_BOND_SLOT(known,active_profile,zmk_ble_active_profile_is_open(),knob_pairing_allowed());
++    pairing_context[bt_conn_index(conn)].slot=slot;
++    pairing_context[bt_conn_index(conn)].generation=slot>=0?profile_generation[slot]:0;
+     LOG_DBG("Connected %s", addr);
+ 
+-    update_advertising();
++    /* Do not invite a second host into an empty slot during the SMP handshake. */
++    if (!IS_ENABLED(CONFIG_SHIELD_KNOB_W) || !zmk_ble_active_profile_is_open() ||
++        !knob_pairing_allowed() || known>=0) {
++        update_advertising();
++    }
+ 
+     if (is_conn_active_profile(conn)) {
+         LOG_DBG("Active profile connected");
+@@ -535,6 +626,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
+     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+ 
+     LOG_DBG("Disconnected from %s (reason 0x%02x)", addr, reason);
++    atomic_set(&last_disconnect,reason);
++    pairing_context[bt_conn_index(conn)].slot=-1;
+ 
+     bt_conn_get_info(conn, &info);
+ 
+@@ -554,12 +647,16 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
+ }
+ 
+ static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
++    atomic_set(&last_security_error,err);
+     char addr[BT_ADDR_LE_STR_LEN];
+ 
+     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+ 
+     if (!err) {
+         LOG_DBG("Security changed: %s level %u", addr, level);
++        if (level>=BT_SECURITY_L2 && is_conn_active_profile(conn)) {
++            k_work_submit(&raise_profile_changed_event_work);
++        }
+     } else {
+         LOG_ERR("Security failed: %s level %u err %d", addr, level, err);
+     }
+@@ -623,9 +720,12 @@ static void auth_cancel(struct bt_conn *conn) {
+ }
+ 
+ static bool pairing_allowed_for_current_profile(struct bt_conn *conn) {
+-    return zmk_ble_active_profile_is_open() ||
+-           (IS_ENABLED(CONFIG_BT_SMP_ALLOW_UNAUTH_OVERWRITE) &&
+-            bt_addr_le_cmp(zmk_ble_active_profile_addr(), bt_conn_get_dst(conn)) == 0);
++    int index=bt_conn_index(conn);
++    int slot=pairing_context[index].slot;
++    if (slot<0 || slot>=ZMK_BLE_PROFILE_COUNT) { return false; }
++    return KNOB_BOND_VALID(slot,zmk_ble_profile_index(bt_conn_get_dst(conn)),
++        zmk_ble_profile_is_open(slot),bt_addr_le_cmp(zmk_ble_profile_address(slot),bt_conn_get_dst(conn))==0,
++        pairing_context[index].generation,profile_generation[slot]);
+ }
+ 
+ static enum bt_security_err auth_pairing_accept(struct bt_conn *conn,
+@@ -634,11 +734,14 @@ static enum bt_security_err auth_pairing_accept(struct bt_conn *conn,
+     bt_conn_get_info(conn, &info);
+ 
+     LOG_DBG("role %d, open? %s", info.role, zmk_ble_active_profile_is_open() ? "yes" : "no");
++    atomic_inc(&pairing_attempts);
+     if (info.role == BT_CONN_ROLE_PERIPHERAL && !pairing_allowed_for_current_profile(conn)) {
++        atomic_set(&last_pair_error,BT_SECURITY_ERR_PAIR_NOT_ALLOWED);
+         LOG_WRN("Rejecting pairing request to taken profile %d", active_profile);
+         return BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
+     }
+ 
++    atomic_set(&last_pair_error,0);
+     return BT_SECURITY_ERR_SUCCESS;
+ };
+ 
+@@ -655,13 +758,14 @@ static void auth_pairing_complete(struct bt_conn *conn, bool bonded) {
+         return;
+     }
+ 
+-    if (!pairing_allowed_for_current_profile(conn)) {
++    if (!bonded || !pairing_allowed_for_current_profile(conn)) {
+         LOG_ERR("Pairing completed but current profile is not open: %s", addr);
+-        bt_unpair(BT_ID_DEFAULT, dst);
++        if (zmk_ble_profile_index(dst)<0) { bt_unpair(BT_ID_DEFAULT, dst); }
++        bt_conn_disconnect(conn,BT_HCI_ERR_AUTH_FAIL);
+         return;
+     }
+ 
+-    set_profile_address(active_profile, dst);
++    set_profile_address(pairing_context[bt_conn_index(conn)].slot, dst);
+     update_advertising();
+ };
+ 
+@@ -675,7 +779,11 @@ static struct bt_conn_auth_cb zmk_ble_auth_cb_display = {
+     .cancel = auth_cancel,
+ };
+ 
++static void knob_pairing_failed(struct bt_conn *conn, enum bt_security_err reason) {
++    atomic_set(&last_pair_error,reason);
++}
+ static struct bt_conn_auth_info_cb zmk_ble_auth_info_cb_display = {
++    .pairing_failed = knob_pairing_failed,
+     .pairing_complete = auth_pairing_complete,
+ };
+ 
+@@ -690,6 +798,7 @@ static void zmk_ble_ready(int err) {
+ }
+ 
+ static int zmk_ble_complete_startup(void) {
++    for (int i=0;i<CONFIG_BT_MAX_CONN;i++) { pairing_context[i].slot=-1; }
+ 
+ #if IS_ENABLED(CONFIG_ZMK_BLE_CLEAR_BONDS_ON_START)
+     LOG_WRN("Clearing all existing BLE bond information from the keyboard");
+diff --git a/app/src/hog.c b/app/src/hog.c
+index c7d9b861..e1b55ee5 100644
+--- a/app/src/hog.c
++++ b/app/src/hog.c
+@@ -42,7 +42,7 @@ struct hids_report {
+ } __packed;
+ 
+ static struct hids_info info = {
+-    .version = 0x0000,
++    .version = 0x0111,
+     .code = 0x00,
+     .flags = HIDS_NORMALLY_CONNECTABLE | HIDS_REMOTE_WAKE,
+ };
+@@ -336,14 +336,15 @@ void send_keyboard_report_callback(struct k_work *work) {
+ K_WORK_DEFINE(hog_keyboard_work, send_keyboard_report_callback);
+ 
+ int zmk_hog_send_keyboard_report(struct zmk_hid_keyboard_report_body *report) {
+-    int err = k_msgq_put(&zmk_hog_keyboard_msgq, report, K_MSEC(100));
++    int err = k_msgq_put(&zmk_hog_keyboard_msgq, report, K_NO_WAIT);
+     if (err) {
+         switch (err) {
+-        case -EAGAIN: {
++        case -ENOMSG: {
+             LOG_WRN("Keyboard message queue full, popping first message and queueing again");
+             struct zmk_hid_keyboard_report_body discarded_report;
+             k_msgq_get(&zmk_hog_keyboard_msgq, &discarded_report, K_NO_WAIT);
+-            return zmk_hog_send_keyboard_report(report);
++            if (k_msgq_put(&zmk_hog_keyboard_msgq, report, K_NO_WAIT)) { return -ENOSPC; }
++            break;
+         }
+         default:
+             LOG_WRN("Failed to queue keyboard report to send (%d)", err);
+@@ -388,14 +389,15 @@ void send_consumer_report_callback(struct k_work *work) {
+ K_WORK_DEFINE(hog_consumer_work, send_consumer_report_callback);
+ 
+ int zmk_hog_send_consumer_report(struct zmk_hid_consumer_report_body *report) {
+-    int err = k_msgq_put(&zmk_hog_consumer_msgq, report, K_MSEC(100));
++    int err = k_msgq_put(&zmk_hog_consumer_msgq, report, K_NO_WAIT);
+     if (err) {
+         switch (err) {
+-        case -EAGAIN: {
++        case -ENOMSG: {
+             LOG_WRN("Consumer message queue full, popping first message and queueing again");
+             struct zmk_hid_consumer_report_body discarded_report;
+             k_msgq_get(&zmk_hog_consumer_msgq, &discarded_report, K_NO_WAIT);
+-            return zmk_hog_send_consumer_report(report);
++            if (k_msgq_put(&zmk_hog_consumer_msgq, report, K_NO_WAIT)) { return -ENOSPC; }
++            break;
+         }
+         default:
+             LOG_WRN("Failed to queue consumer report to send (%d)", err);
+@@ -441,14 +443,15 @@ void send_mouse_report_callback(struct k_work *work) {
+ K_WORK_DEFINE(hog_mouse_work, send_mouse_report_callback);
+ 
+ int zmk_hog_send_mouse_report(struct zmk_hid_mouse_report_body *report) {
+-    int err = k_msgq_put(&zmk_hog_mouse_msgq, report, K_MSEC(100));
++    int err = k_msgq_put(&zmk_hog_mouse_msgq, report, K_NO_WAIT);
+     if (err) {
+         switch (err) {
+-        case -EAGAIN: {
++        case -ENOMSG: {
+             LOG_WRN("Consumer message queue full, popping first message and queueing again");
+             struct zmk_hid_mouse_report_body discarded_report;
+             k_msgq_get(&zmk_hog_mouse_msgq, &discarded_report, K_NO_WAIT);
+-            return zmk_hog_send_mouse_report(report);
++            if (k_msgq_put(&zmk_hog_mouse_msgq, report, K_NO_WAIT)) { return -ENOSPC; }
++            break;
+         }
+         default:
+             LOG_WRN("Failed to queue mouse report to send (%d)", err);
+diff --git a/app/src/rgb_underglow.c b/app/src/rgb_underglow.c
+index 3453fb44..bc72d0aa 100644
+--- a/app/src/rgb_underglow.c
++++ b/app/src/rgb_underglow.c
+@@ -175,6 +175,8 @@ static void zmk_rgb_underglow_effect_swirl(void) {
+     state.animation_step = state.animation_step % HUE_MAX;
+ }
+ 
++__weak void knob_rgb_override(struct led_rgb *pixels, unsigned count) {}
++
+ static void zmk_rgb_underglow_tick(struct k_work *work) {
+     switch (state.current_effect) {
+     case UNDERGLOW_EFFECT_SOLID:
+@@ -191,6 +193,7 @@ static void zmk_rgb_underglow_tick(struct k_work *work) {
+         break;
+     }
+ 
++    knob_rgb_override(pixels, STRIP_NUM_PIXELS);
+     int err = led_strip_update_rgb(led_strip, pixels, STRIP_NUM_PIXELS);
+     if (err < 0) {
+         LOG_ERR("Failed to update the RGB strip (%d)", err);
+@@ -443,23 +446,18 @@ int zmk_rgb_underglow_change_brt(int direction) {
+     return zmk_rgb_underglow_save_state();
+ }
+ 
+-int zmk_rgb_underglow_change_spd(int direction) {
++int zmk_rgb_underglow_set_spd(uint8_t speed) {
+     if (!led_strip)
+         return -ENODEV;
+-
+-    if (state.animation_speed == 1 && direction < 0) {
+-        return 0;
+-    }
+-
+-    state.animation_speed += direction;
+-
+-    if (state.animation_speed > 5) {
+-        state.animation_speed = 5;
+-    }
+-
++    if (speed < 1 || speed > 5) { return -EINVAL; }
++    state.animation_speed = speed;
+     return zmk_rgb_underglow_save_state();
+ }
+ 
++int zmk_rgb_underglow_change_spd(int direction) {
++    return zmk_rgb_underglow_set_spd(CLAMP((int)state.animation_speed + direction, 1, 5));
++}
++
+ #if IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_IDLE) ||                                          \
+     IS_ENABLED(CONFIG_ZMK_RGB_UNDERGLOW_AUTO_OFF_USB)
+ struct rgb_underglow_sleep_state {
+diff --git a/app/include/zmk/knob_bond_policy.h b/app/include/zmk/knob_bond_policy.h
+new file mode 100644
+index 00000000..de22286b
+--- /dev/null
++++ b/app/include/zmk/knob_bond_policy.h
+@@ -0,0 +1,13 @@
++#pragma once
++/* Pure rules shared by connection admission and compile-time regression checks. */
++#define KNOB_BOND_SLOT(known, selected, open, pairing) \
++    ((known)>=0 ? (known) : ((open)&&(pairing) ? (selected) : -1))
++#define KNOB_BOND_VALID(slot, known, open, same, saved_generation, generation) \
++    ((slot)>=0 && (slot)<3 && ((known)<0 || (known)==(slot)) && \
++     ((open)||(same)) && (saved_generation)==(generation))
++_Static_assert(KNOB_BOND_SLOT(-1,1,1,1)==1,"New phone belongs to selected slot");
++_Static_assert(KNOB_BOND_SLOT(0,1,1,1)==0,"Existing PC must not occupy phone slot");
++_Static_assert(KNOB_BOND_SLOT(-1,1,1,0)==-1,"No unsolicited new pairing");
++_Static_assert(KNOB_BOND_VALID(1,-1,1,0,2,2),"Selected slot may finish pairing");
++_Static_assert(!KNOB_BOND_VALID(1,0,1,0,2,2),"No duplicate host in another slot");
++_Static_assert(!KNOB_BOND_VALID(1,-1,1,0,2,3),"Reset invalidates an in-flight pairing");
