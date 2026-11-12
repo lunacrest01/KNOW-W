@@ -9,7 +9,7 @@ index be0ef252..1b652323 100644
 +int zmk_rgb_underglow_set_spd(uint8_t speed);
  int zmk_rgb_underglow_set_hsb(struct zmk_led_hsb color);
 diff --git a/app/src/ble.c b/app/src/ble.c
-index 51b172b9..f3f973e1 100644
+index 51b172b9..58e39f2e 100644
 --- a/app/src/ble.c
 +++ b/app/src/ble.c
 @@ -36,6 +36,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
@@ -186,11 +186,10 @@ index 51b172b9..f3f973e1 100644
  
      update_advertising();
  
-@@ -496,13 +571,27 @@ static struct settings_handler profiles_handler = {
+@@ -496,13 +571,37 @@ static struct settings_handler profiles_handler = {
  static bool is_conn_active_profile(const struct bt_conn *conn) {
      return bt_addr_le_cmp(bt_conn_get_dst(conn), &profiles[active_profile].peer) == 0;
  }
--
 +bool knob_ble_hid_ready(void) {
 +    struct bt_conn *conn=zmk_ble_active_profile_conn();
 +    if (!conn) { return false; }
@@ -198,6 +197,16 @@ index 51b172b9..f3f973e1 100644
 +    bt_conn_unref(conn);
 +    return ready;
 +}
++
++/* Read-only reporting for the Studio diagnostics: stored peers and advertising mode. */
++void knob_ble_bonds(char out[][BT_ADDR_LE_STR_LEN], int flags[], int count) {
++    for (int i=0;i<count && i<ZMK_BLE_PROFILE_COUNT;i++) {
++        bt_addr_le_to_str(&profiles[i].peer, out[i], BT_ADDR_LE_STR_LEN);
++        flags[i] = (zmk_ble_profile_is_open(i) ? 0 : 1) | (zmk_ble_profile_is_connected(i) ? 2 : 0);
++    }
++}
+ 
++int knob_ble_advertising(void) { return (advertising_status << 1) | (advertising_filtered ? 1 : 0); }
  static void connected(struct bt_conn *conn, uint8_t err) {
      char addr[BT_ADDR_LE_STR_LEN];
      struct bt_conn_info info;
@@ -216,7 +225,7 @@ index 51b172b9..f3f973e1 100644
  
      if (info.role != BT_CONN_ROLE_PERIPHERAL) {
          LOG_DBG("SKIPPING FOR ROLE %d", info.role);
-@@ -512,15 +601,17 @@ static void connected(struct bt_conn *conn, uint8_t err) {
+@@ -512,15 +611,17 @@ static void connected(struct bt_conn *conn, uint8_t err) {
      bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
      advertising_status = ZMK_ADV_NONE;
  
@@ -241,7 +250,7 @@ index 51b172b9..f3f973e1 100644
  
      if (is_conn_active_profile(conn)) {
          LOG_DBG("Active profile connected");
-@@ -535,6 +626,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
+@@ -535,6 +636,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
      bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
  
      LOG_DBG("Disconnected from %s (reason 0x%02x)", addr, reason);
@@ -250,7 +259,7 @@ index 51b172b9..f3f973e1 100644
  
      bt_conn_get_info(conn, &info);
  
-@@ -554,12 +647,16 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
+@@ -554,12 +657,16 @@ static void disconnected(struct bt_conn *conn, uint8_t reason) {
  }
  
  static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
@@ -267,7 +276,7 @@ index 51b172b9..f3f973e1 100644
      } else {
          LOG_ERR("Security failed: %s level %u err %d", addr, level, err);
      }
-@@ -623,9 +720,12 @@ static void auth_cancel(struct bt_conn *conn) {
+@@ -623,9 +730,12 @@ static void auth_cancel(struct bt_conn *conn) {
  }
  
  static bool pairing_allowed_for_current_profile(struct bt_conn *conn) {
@@ -283,7 +292,7 @@ index 51b172b9..f3f973e1 100644
  }
  
  static enum bt_security_err auth_pairing_accept(struct bt_conn *conn,
-@@ -634,11 +734,14 @@ static enum bt_security_err auth_pairing_accept(struct bt_conn *conn,
+@@ -634,11 +744,14 @@ static enum bt_security_err auth_pairing_accept(struct bt_conn *conn,
      bt_conn_get_info(conn, &info);
  
      LOG_DBG("role %d, open? %s", info.role, zmk_ble_active_profile_is_open() ? "yes" : "no");
@@ -298,7 +307,7 @@ index 51b172b9..f3f973e1 100644
      return BT_SECURITY_ERR_SUCCESS;
  };
  
-@@ -655,13 +758,14 @@ static void auth_pairing_complete(struct bt_conn *conn, bool bonded) {
+@@ -655,13 +768,14 @@ static void auth_pairing_complete(struct bt_conn *conn, bool bonded) {
          return;
      }
  
@@ -316,7 +325,7 @@ index 51b172b9..f3f973e1 100644
      update_advertising();
  };
  
-@@ -675,7 +779,11 @@ static struct bt_conn_auth_cb zmk_ble_auth_cb_display = {
+@@ -675,7 +789,11 @@ static struct bt_conn_auth_cb zmk_ble_auth_cb_display = {
      .cancel = auth_cancel,
  };
  
@@ -328,7 +337,7 @@ index 51b172b9..f3f973e1 100644
      .pairing_complete = auth_pairing_complete,
  };
  
-@@ -690,6 +798,7 @@ static void zmk_ble_ready(int err) {
+@@ -690,6 +808,7 @@ static void zmk_ble_ready(int err) {
  }
  
  static int zmk_ble_complete_startup(void) {

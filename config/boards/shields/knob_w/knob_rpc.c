@@ -111,6 +111,8 @@ static void send(const char *text) {
     }
 }
 extern void knob_ble_diag(int values[6]);
+extern void knob_ble_bonds(char out[][BT_ADDR_LE_STR_LEN], int flags[], int count);
+extern int knob_ble_advertising(void);
 extern void knob_fault_read(uint32_t *reason,uint32_t *seconds);
 extern uint32_t knob_fault_thread(void);
 extern uint32_t knob_fault_pc(void);
@@ -150,6 +152,20 @@ static void handle(char *line) {
         int v[6]; char msg[320];
         knob_ble_diag(v);
         snprintf(msg,sizeof(msg),"{\"id\":%d,\"ok\":true,\"profile\":%d,\"pairing\":%s,\"links\":%d,\"link_error\":%d,\"auth_requests\":%d,\"pair_error\":%d,\"security_error\":%d,\"disconnect_reason\":%d,\"bonded\":[%d,%d,%d]}\n",req.id,zmk_ble_active_profile_index()+1,knob_pairing_allowed()?"true":"false",v[0],v[1],v[2],v[3],v[4],v[5],!zmk_ble_profile_is_open(0),!zmk_ble_profile_is_open(1),!zmk_ble_profile_is_open(2));
+        send(msg); return;
+    }
+    if (!strcmp(req.cmd,"get_bonds")) {
+        char addr[3][BT_ADDR_LE_STR_LEN]; int flags[3]; char msg[460];
+        knob_ble_bonds(addr,flags,3);
+        int adv=knob_ble_advertising();
+        snprintf(msg,sizeof(msg),"{\"id\":%d,\"ok\":true,\"adv\":%d,\"filtered\":%d,\"pairing\":%s,"
+            "\"slots\":[{\"addr\":\"%s\",\"bonded\":%s,\"connected\":%s},"
+            "{\"addr\":\"%s\",\"bonded\":%s,\"connected\":%s},"
+            "{\"addr\":\"%s\",\"bonded\":%s,\"connected\":%s}]}\n",
+            req.id,adv>>1,adv&1,knob_pairing_allowed()?"true":"false",
+            addr[0],flags[0]&1?"true":"false",flags[0]&2?"true":"false",
+            addr[1],flags[1]&1?"true":"false",flags[1]&2?"true":"false",
+            addr[2],flags[2]&1?"true":"false",flags[2]&2?"true":"false");
         send(msg); return;
     }
     if (!strcmp(req.cmd,"get_labels") || !strcmp(req.cmd,"set_labels")) {
