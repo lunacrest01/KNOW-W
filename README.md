@@ -216,6 +216,15 @@ through a software reboot. Connect
 USB and close Studio's serial connection before running it. A power cut or
 bootloader RAM overwrite can erase that diagnostic; it is not a flash crash log.
 
+`knob_diag.py` is the serial diagnostic entry point. `--status` prints uptime,
+layer, active profile, bond table, advertising mode and the fault record;
+`--watch 60` samples every second into `build/knob-status.jsonl`;
+`--capture 120` writes the debug log to `build/pairing-capture.log` with long
+hex runs redacted; and `--pair 2` opens a 90-second pairing window on an empty
+slot without erasing a bond (diagnostic image only, because the release build
+compiles that command out). `get_bonds` also answers over raw JSON, listing each
+slot's peer address with its bonded and connected state.
+
 Both images compiled successfully. Run
 `C:/Users/bhavy/zephyrproject/.venv/Scripts/python.exe -m pytest test_firmware.py -q`.
 Sixteen checks plus compile-time power-boundary assertions cover OLED rendering/transfer buffer sizing, navigation, encoder bindings, RGB/OLED separation, discrete scroll direction/step values,
